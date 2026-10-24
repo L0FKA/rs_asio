@@ -74,6 +74,20 @@ static void WriteAudioSampleInt(TInt sample, BYTE* outData)
 	}
 }
 
+// Integer gain in double with rounding and saturation. The previous whole-percent
+// multiplier truncated small gains (0.0458 became 0.04, -1.2 dB; anything under
+// 0.01 became silence), which matters once the endpoint volume is tapered.
+template <typename T>
+static T ApplyIntegerGain(std::int64_t sample, double gain, std::int64_t minValue, std::int64_t maxValue)
+{
+	double scaled = (double)sample * gain;
+	scaled = scaled < 0.0 ? scaled - 0.5 : scaled + 0.5;
+	std::int64_t value = (std::int64_t)scaled;
+	if (value < minValue) value = minValue;
+	else if (value > maxValue) value = maxValue;
+	return (T)value;
+}
+
 static bool AudioBlit(const BYTE* inData, const WORD inStride, BYTE* outData, const WORD outStride, const unsigned bytesPerSample, const DWORD numSamples)
 {
 	if (bytesPerSample == 1)
@@ -230,26 +244,25 @@ bool AudioProcessing::CanConvertFormat(ASIOSampleType inSampleType, ASIOSampleTy
 
 bool AudioProcessing::DoSoftwareVolumeDsp(BYTE* data, ASIOSampleType inSampleType, DWORD numSamples, float fVolumeScalar)
 {
+	const double gain = (double)fVolumeScalar;
+
 	if (inSampleType == ASIOSTInt16LSB)
 	{
-		const int scalarPercentPoints = (int)(fVolumeScalar * 100.f);
 		for (DWORD i = 0; i < numSamples; ++i, data += 2)
 		{
-			std::int64_t sample = *(std::int16_t*)data;
-			sample = (sample * scalarPercentPoints) / 100;
-			*(std::int16_t*)data = (std::int16_t)sample;
+			const std::int64_t sample = *(std::int16_t*)data;
+			*(std::int16_t*)data = ApplyIntegerGain<std::int16_t>(sample, gain, -32768, 32767);
 		}
 		return true;
 	}
 	else if (inSampleType == ASIOSTInt24LSB)
 	{
-		const int scalarPercentPoints = (int)(fVolumeScalar * 100.f);
 		for (DWORD i = 0; i < numSamples; ++i, data += 3)
 		{
 			std::int64_t sample = data[0] | (data[1] << 8) | (data[2] << 16);
 			if (sample & 0x800000)
 				sample |= ~std::int64_t(0xffffff);
-			sample = (sample * scalarPercentPoints) / 100;
+			sample = ApplyIntegerGain<std::int64_t>(sample, gain, -8388608, 8388607);
 			data[0] = (std::uint8_t)(sample & 0xff);
 			data[1] = (std::uint8_t)((sample >> 8) & 0xff);
 			data[2] = (std::uint8_t)((sample >> 16) & 0xff);
@@ -258,12 +271,10 @@ bool AudioProcessing::DoSoftwareVolumeDsp(BYTE* data, ASIOSampleType inSampleTyp
 	}
 	else if (inSampleType == ASIOSTInt32LSB)
 	{
-		const int scalarPercentPoints = (int)(fVolumeScalar * 100.f);
 		for (DWORD i = 0; i < numSamples; ++i, data += 4)
 		{
-			std::int64_t sample = *(std::int32_t*)data;
-			sample = (sample * scalarPercentPoints) / 100;
-			*(std::int32_t*)data = (std::int32_t)sample;
+			const std::int64_t sample = *(std::int32_t*)data;
+			*(std::int32_t*)data = ApplyIntegerGain<std::int32_t>(sample, gain, INT32_MIN, INT32_MAX);
 		}
 		return true;
 	}
@@ -277,10 +288,9 @@ bool AudioProcessing::DoSoftwareVolumeDsp(BYTE* data, ASIOSampleType inSampleTyp
 	}
 	else if (inSampleType == ASIOSTFloat64LSB)
 	{
-		const double v = (double)fVolumeScalar;
 		for (DWORD i = 0; i < numSamples; ++i, data += 8)
 		{
-			(*(double*)data) *= v;
+			(*(double*)data) *= gain;
 		}
 		return true;
 	}
